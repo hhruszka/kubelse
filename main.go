@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	json2 "encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/tabwriter"
 )
 
@@ -120,6 +120,18 @@ func checkUtils(clientset *kubernetes.Clientset, config *rest.Config, podName st
 	}
 }
 
+func checkUtilsv2(clientset *kubernetes.Clientset, config *rest.Config, podName string, containerName string, namespace string, utils []string) bool {
+	var utilFound bool = true
+	for _, util := range utils {
+		result, _ := checkUtilInContainer(clientset, config, namespace, podName, containerName, util)
+		utilFound = utilFound && result
+		if result == false {
+			break
+		}
+	}
+	return utilFound
+}
+
 func getPods(clientset *kubernetes.Clientset, namespace string, options metaV1.ListOptions) ([]corev1.Pod, error) {
 	var pods *corev1.PodList
 	pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), options)
@@ -174,49 +186,85 @@ func getUniquePods(clientset *kubernetes.Clientset, namespace string) (int, []co
 }
 
 func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []ContainerInfo) {
-	//var podChan chan ContainerInfo = make(chan ContainerInfo, 20)
+	var (
+		podProdChan chan ContainerInfo = make(chan ContainerInfo, 20)
+		conProdChan chan ContainerInfo = make(chan ContainerInfo, 100)
+	)
+	var (
+		podWg           sync.WaitGroup
+		contVerWorkerWg sync.WaitGroup
+		contCollectorWg sync.WaitGroup
+	)
 
 	status = make(UtilsStatus)
-	shell := make(map[string]map[string]string)
 
 	if len(utils) == 0 {
 		return nil, nil
 	}
 
-	//go func() {
-	for _, pod := range pods {
-		if pod.Status.Phase == "Running" {
-			status[pod.Name] = make(map[string]map[string]bool)
-			shell[pod.Name] = make(map[string]string)
-			for _, container := range pod.Spec.Containers {
-				status[pod.Name][container.Name] = make(map[string]bool)
-				checkUtils(clientset, config, pod.Name, container.Name, *namespace, utils)
-				shell[pod.Name][container.Name], _ = getShellInContainer(clientset, config, *namespace, pod.Name, container.Name)
+	for i := 0; i < 20; i++ {
+		contVerWorkerWg.Add(1)
+		go func() {
+			defer contVerWorkerWg.Done()
+			for container := range podProdChan {
+				container.shell, _ = getShellInContainer(clientset, config, *namespace, container.podName, container.containerName)
+				container.testable = checkUtilsv2(clientset, config, container.podName, container.containerName, *namespace, utils) && container.shell != ""
+				conProdChan <- container
 			}
-		}
+		}()
 	}
-	//}()
 
-	if len(status) > 0 {
-		for pod, containers := range status {
-			for container, utilsStatus := range containers {
-				canBeTested := true
-				for _, present := range utilsStatus {
-					canBeTested = canBeTested && present
-					canBeTested = canBeTested && shell[pod][container] != ""
-				}
-				if canBeTested {
-					target = append(target, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
-				} else {
-					nontestable = append(nontestable, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
+	podWg.Add(1)
+	go func() {
+		defer podWg.Done()
+		for _, pod := range pods {
+			if pod.Status.Phase == "Running" {
+				for _, container := range pod.Spec.Containers {
+					podProdChan <- ContainerInfo{podName: pod.Name, containerName: container.Name}
 				}
 			}
 		}
-	}
-	if debug {
-		jb, _ := json2.MarshalIndent(status, "", "    ")
-		fmt.Println(string(jb))
-	}
+	}()
+
+	contCollectorWg.Add(1)
+	go func() {
+		defer contCollectorWg.Done()
+		for container := range conProdChan {
+			switch {
+			case container.testable:
+				target = append(target, container)
+			case !container.testable:
+				nontestable = append(nontestable, container)
+			}
+		}
+	}()
+
+	podWg.Wait()
+	close(podProdChan)
+	contVerWorkerWg.Wait()
+	close(conProdChan)
+	contCollectorWg.Wait()
+
+	//if len(status) > 0 {
+	//	for pod, containers := range status {
+	//		for container, utilsStatus := range containers {
+	//			canBeTested := true
+	//			for _, present := range utilsStatus {
+	//				canBeTested = canBeTested && present
+	//				canBeTested = canBeTested && shell[pod][container] != ""
+	//			}
+	//			if canBeTested {
+	//				target = append(target, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
+	//			} else {
+	//				nontestable = append(nontestable, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
+	//			}
+	//		}
+	//	}
+	//}
+	//if debug {
+	//	jb, _ := json2.MarshalIndent(status, "", "    ")
+	//	fmt.Println(string(jb))
+	//}
 	return target, nontestable
 }
 
