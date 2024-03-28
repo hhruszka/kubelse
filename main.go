@@ -289,7 +289,7 @@ func main() {
 	targetContainers, nontestableContainers = verifyContainers(pods)
 	fmt.Printf("[+] Found %d containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
 	if len(targetContainers) > 0 {
-		fmt.Println("[+] Following containers can be tested:")
+		fmt.Printf("[+] Following %d containers can be tested:\n", len(targetContainers))
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
 		for _, list := range targetContainers {
 			fmt.Fprintf(w, "%s\t%s\n", list.podName, list.containerName)
@@ -301,7 +301,7 @@ func main() {
 	}
 
 	if len(nontestableContainers) > 0 {
-		fmt.Println("[-] Following containers cannot be tested:")
+		fmt.Printf("[-] Following %d containers cannot be tested:\n", len(nontestableContainers))
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
 		for _, container := range nontestableContainers {
 			fmt.Fprintf(w, "%s\t%s\n", container.podName, container.containerName)
