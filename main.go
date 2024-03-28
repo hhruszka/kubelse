@@ -169,6 +169,8 @@ func getUniquePods(clientset *kubernetes.Clientset, namespace string) (int, []co
 	}
 
 	for _, deployment := range deployments.Items {
+		// to find all pods that are part of a given deployment we need to use deployment.Spec.Selector.MatchLabels
+		// from the deployment. This is essential.
 		options := metaV1.ListOptions{LabelSelector: mapToLabelSelector(deployment.Spec.Selector.MatchLabels)}
 		pods, err := getPods(clientset, namespace, options)
 		if err != nil {
@@ -202,7 +204,8 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 		return nil, nil
 	}
 
-	for i := 0; i < 20; i++ {
+	// these are workers that check shell and utilities
+	for i := 0; i < 60; i++ {
 		contVerWorkerWg.Add(1)
 		go func() {
 			defer contVerWorkerWg.Done()
@@ -214,6 +217,7 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 		}()
 	}
 
+	// this goroutine distributes found pods through podProdChan for workers that check shell and utilities
 	podWg.Add(1)
 	go func() {
 		defer podWg.Done()
@@ -226,6 +230,9 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 		}
 	}()
 
+	// this results collector goroutine that gets verified containers from workers and puts them into two buckets (slices):
+	// - bucket containing containers that will be tested with lse.sh because they have everything needed
+	// - bucket with containers that lack utilities and cannot be tested with lse.sh
 	contCollectorWg.Add(1)
 	go func() {
 		defer contCollectorWg.Done()
@@ -245,26 +252,6 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 	close(conProdChan)
 	contCollectorWg.Wait()
 
-	//if len(status) > 0 {
-	//	for pod, containers := range status {
-	//		for container, utilsStatus := range containers {
-	//			canBeTested := true
-	//			for _, present := range utilsStatus {
-	//				canBeTested = canBeTested && present
-	//				canBeTested = canBeTested && shell[pod][container] != ""
-	//			}
-	//			if canBeTested {
-	//				target = append(target, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
-	//			} else {
-	//				nontestable = append(nontestable, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
-	//			}
-	//		}
-	//	}
-	//}
-	//if debug {
-	//	jb, _ := json2.MarshalIndent(status, "", "    ")
-	//	fmt.Println(string(jb))
-	//}
 	return target, nontestable
 }
 
