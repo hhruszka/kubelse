@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/util/homedir"
 	"os"
 	"path/filepath"
+	runtime2 "runtime"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -259,11 +260,11 @@ func promptYN(prompt string) bool {
 	var response string
 
 	for {
-		fmt.Print(prompt)
+		fmt.Fprint(os.Stderr, prompt)
 		_, err := fmt.Scanf("%s\n", &response)
 
 		if err != nil {
-			fmt.Println("Error reading input. Please try again.")
+			fmt.Fprintln(os.Stderr, "Error reading input. Please try again.")
 			continue
 		}
 
@@ -274,7 +275,7 @@ func promptYN(prompt string) bool {
 		} else if response == "N" {
 			return false
 		} else {
-			fmt.Println("Invalid input. Please enter 'Y' or 'N'.")
+			fmt.Fprintln(os.Stderr, "Invalid input. Please enter 'Y' or 'N'.")
 		}
 	}
 }
@@ -306,38 +307,39 @@ func init() {
 }
 
 func main() {
-	fmt.Println("[+] Started")
+	fmt.Fprintln(os.Stderr, "[+] Started")
 
 	//pods, err := getPods(clientset, *namespace, metaV1.ListOptions{})
 	podCount, pods, err := getUniquePods(clientset, *namespace)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(0)
 	}
 
 	if len(pods) == 0 {
-		fmt.Printf("[-] No pods found in namespace %q\n", *namespace)
+		fmt.Fprintf(os.Stderr, "[-] No pods found in namespace %q\n", *namespace)
 		os.Exit(0)
 	}
-	fmt.Printf("[+] Found %d unique pods out of %d deployments related pods in %s namespace\n", len(pods), podCount, *namespace)
-	fmt.Println("[*] Identifying testable containers")
+	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d deployments related pods in %s namespace\n", len(pods), podCount, *namespace)
+	fmt.Fprintln(os.Stderr, "[*] Identifying testable containers")
 	targetContainers, nontestableContainers = verifyContainers(pods)
-	fmt.Printf("[+] Found %d containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
+	fmt.Fprintf(os.Stderr, "[+] Found %d containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
+
 	if len(targetContainers) > 0 {
-		fmt.Printf("[+] Following %d containers can be tested:\n", len(targetContainers))
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+		fmt.Fprintf(os.Stderr, "[+] Following %d containers can be tested:\n", len(targetContainers))
+		w := tabwriter.NewWriter(os.Stderr, 0, 0, 1, ' ', 0)
 		for _, list := range targetContainers {
 			fmt.Fprintf(w, "%s\t%s\n", list.podName, list.containerName)
 		}
 		fmt.Fprintln(w, "\t")
 		w.Flush()
 	} else {
-		fmt.Println("[-] Did not find any testable containers")
+		fmt.Fprintln(os.Stderr, "[-] Did not find any testable containers")
 	}
 
 	if len(nontestableContainers) > 0 {
-		fmt.Printf("[-] Following %d containers cannot be tested:\n", len(nontestableContainers))
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
+		fmt.Fprintf(os.Stderr, "[-] Following %d containers cannot be tested:\n", len(nontestableContainers))
+		w := tabwriter.NewWriter(os.Stderr, 0, 0, 1, ' ', 0)
 		for _, container := range nontestableContainers {
 			fmt.Fprintf(w, "%s\t%s\n", container.podName, container.containerName)
 		}
@@ -346,34 +348,70 @@ func main() {
 	}
 
 	if promptYN("\nDo you wish to proceed with testing? (Y/N): ") {
-		fmt.Println("Proceeding with testing...")
+		fmt.Fprintln(os.Stderr, "Proceeding with testing...")
 	} else {
-		fmt.Println("Action cancelled.")
+		fmt.Fprintln(os.Stderr, "Action cancelled.")
 		os.Exit(1)
 	}
 
 	if len(targetContainers) > 0 {
+		const WORKERSNO int = 100
+		runtime2.GOMAXPROCS(runtime2.NumCPU())
+
+		var (
+			contProdChan    chan ContainerInfo = make(chan ContainerInfo, WORKERSNO)
+			resultsProdChan chan bytes.Buffer  = make(chan bytes.Buffer, WORKERSNO)
+		)
+
+		var (
+			contFanOutWg       sync.WaitGroup
+			testWorkerWg       sync.WaitGroup
+			resultsCollectorWg sync.WaitGroup
+		)
+
+		// this neccessary when cross compiling on windows
 		lsetmp := bytes.Replace(lse, []byte("\r\n"), []byte("\n"), -1)
 		lsetmp = bytes.Replace(lsetmp, []byte("\r"), []byte(""), -1)
-		tested := make(map[string]int)
-		for _, container := range targetContainers {
+
+		contFanOutWg.Add(1)
+		go func() {
+			defer contFanOutWg.Done()
+			for _, container := range targetContainers {
+				contProdChan <- container
+			}
+		}()
+
+		for id := 0; id < WORKERSNO; id++ {
 			var stdout, stderr bytes.Buffer
 
-			if _, done := tested[container.containerName]; done {
-				fmt.Printf("[*] Skipping %s/%s container since %s contaner has already been tested\n", container.podName, container.containerName, container.containerName)
-				continue
-			}
-
-			lsescript := bytes.NewBuffer(lsetmp)
-
-			fmt.Printf("[+] Testing %s/%s container\n", container.podName, container.containerName)
-			err := exec(clientset, config, *namespace, container.podName, container.containerName, container.shell, lsescript, &stdout, &stderr, false)
-			if err == nil {
-				fmt.Println(stdout.String())
-				tested[container.containerName]++
-			} else {
-				fmt.Printf("[-] Error encounter: %s\n", stderr.String())
-			}
+			testWorkerWg.Add(1)
+			go func() {
+				defer testWorkerWg.Done()
+				for container := range contProdChan {
+					lsescript := bytes.NewBuffer(lsetmp)
+					err := exec(clientset, config, *namespace, container.podName, container.containerName, container.shell, lsescript, &stdout, &stderr, false)
+					if err == nil {
+						resultsProdChan <- stdout
+					}
+				}
+			}()
 		}
+
+		resultsCollectorWg.Add(1)
+		go func() {
+			var cnt int
+			defer resultsCollectorWg.Done()
+			for report := range resultsProdChan {
+				fmt.Println(report.String())
+				cnt++
+				fmt.Fprintf(os.Stderr, "\rAnalyzed %d containers", cnt)
+			}
+		}()
+
+		contFanOutWg.Wait()
+		close(contProdChan)
+		testWorkerWg.Wait()
+		close(resultsProdChan)
+		resultsCollectorWg.Wait()
 	}
 }
