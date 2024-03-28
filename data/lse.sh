@@ -84,9 +84,9 @@ lse_distro_codename="" # retrieved below with lse_get_distro_codename
 lse_passed_tests=""
 lse_executed_tests=""
 lse_DEBUG=false
-lse_procmon_data=`mktemp`
-lse_procmon_lock=`mktemp`
-lse_cve_tmp=''
+#lse_procmon_data=`mktemp`
+#lse_procmon_lock=`mktemp`
+#lse_cve_tmp=''
 
 # printf
 printf "$reset" | grep -q '\\' && alias printf="env printf"
@@ -248,9 +248,9 @@ lse_cve_list="
 ##( Options
 lse_color=true
 lse_alt_color=false
-lse_interactive=true
+lse_interactive=false
 lse_proc_time=60
-lse_level=0 #Valid levels 0:default, 1:interesting, 2:all
+lse_level=2 #Valid levels 0:default, 1:interesting, 2:all
 lse_selection="" #Selected tests to run. Empty means all.
 lse_find_opts='-path /proc -prune -o -path /sys -prune -o -path /dev -prune -o' #paths to exclude from searches
 lse_grep_opts='--color=always'
