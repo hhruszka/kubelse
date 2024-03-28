@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
-	"errors"
+	json2 "encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	corev1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -14,36 +15,35 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
-	k8sexec "k8s.io/client-go/util/exec"
 	"k8s.io/client-go/util/homedir"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"text/tabwriter"
 )
 
-type container struct {
+type ContainerInfo struct {
 	podName       string
 	containerName string
 	shell         string
 }
 
 var (
-	debug                                   bool
-	kubeconfig                              *string
-	namespace                               *string
-	config                                  *rest.Config
-	clientset                               *kubernetes.Clientset
-	utils                                   []string
-	targetContainers, nontestableContainers []container
+	debug      bool
+	kubeconfig *string
+	namespace  *string
+	config     *rest.Config
+	clientset  *kubernetes.Clientset
+	//utils                                   []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/ps", "stat /bin/grep"}
+	utils                                   []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/grep"}
+	targetContainers, nontestableContainers []ContainerInfo
 	logBuffer                               bytes.Buffer
 )
 
 //go:embed data/lse.sh
 var lse []byte
 
-func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string, podName string, containerName string, cmd string, stdin *bytes.Buffer, stdout *bytes.Buffer, stderr *bytes.Buffer, tty bool) error {
+func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string, podName string, containerName string, cmd string, stdin io.Reader, stdout io.Writer, stderr io.Writer, tty bool) error {
 	req := clientset.CoreV1().RESTClient().
 		Post().
 		Resource("pods").
@@ -58,11 +58,6 @@ func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string
 			Stderr:    stderr != nil,
 			TTY:       tty,
 		}, scheme.ParameterCodec)
-	//Param("container", containerName).
-	//Param("stdout", "true").
-	//Param("stderr", "true").
-	//Param("command", cmd).
-	//Param("command", "--version")
 
 	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
@@ -72,13 +67,15 @@ func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string
 		return err
 	}
 
-	//var stdout, stderr bytes.Buffer
 	err = executor.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
 		Stdin:  stdin,
 		Stdout: stdout,
 		Stderr: stderr,
-		Tty:    tty,
+		Tty:    false,
 	})
+
+	//fmt.Println(stdout)
+
 	return err
 }
 
@@ -100,77 +97,19 @@ func getShellInContainer(clientset *kubernetes.Clientset, config *rest.Config, n
 	return "", err
 }
 
-func checkUtilInContainer(clientset *kubernetes.Clientset, config *rest.Config, namespace, podName, containerName string, util string) bool {
-	commandArgs := strings.Fields(util)
-	req := clientset.CoreV1().RESTClient().
-		Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
-			Command:   commandArgs,
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       false,
-		}, scheme.ParameterCodec)
-
-	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
-	if err != nil {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[-][%s:%s] Execution of %q failed with error  %s\n", podName, containerName, util, err)
-		}
-		return false
-	}
-
-	// Redirecting standard streams to bytes.Buffer prevents them from printing in console.
-	// They could be directed to e.g. os.Stdin etc.
+func checkUtilInContainer(clientset *kubernetes.Clientset, config *rest.Config, namespace, podName, containerName string, util string) (bool, error) {
 	var stdout, stderr bytes.Buffer
-	err = executor.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
-		Stdin:  nil,
-		Stdout: &stdout,
-		Stderr: &stderr,
-		Tty:    false,
-	})
-
-	if err != nil {
-		if debug {
-			var e k8sexec.CodeExitError
-			switch {
-			case errors.As(err, &e):
-				fmt.Fprintf(os.Stderr, "[-][%s:%s] Execution of %q failed with error code: %d -> %s\n", podName, containerName, util, e.ExitStatus(), e.String())
-				if stdout.Len() > 0 {
-					fmt.Fprintf(os.Stderr, "[-][%s:%s] Following output was returned:\n%s\n", podName, containerName, stdout.String())
-				}
-			default:
-				fmt.Fprintf(os.Stderr, "[-][%s:%s] Execution of %q failed with error %s\n", podName, containerName, util, err)
-				if stdout.Len() > 0 {
-					fmt.Fprintf(os.Stderr, "[-][%s:%s] Following output was returned:\n%s\n", podName, containerName, stdout.String())
-				}
-				xType := reflect.TypeOf(err)
-				fmt.Fprintln(os.Stderr, "[-][%s:%s] 1: ", xType.String(), xType.PkgPath(), xType.Kind(), xType.Kind() == reflect.Ptr)
-			}
-		}
-		return false
-	}
-
-	// If stdout is not empty, the shell exists.
-	//found = stdout.Len() > 0 || err == nil
-	//return found
-	// no errors where returned from the execution thus the command exists
-	// using stdout.Len() to determine if command exists is wrong since it also contains error messages.
-	return err == nil
+	err := exec(clientset, config, namespace, podName, containerName, util, nil, &stdout, &stderr, false)
+	return err == nil, err
 }
 
 type UtilsStatus map[string]map[string]map[string]bool
 
 var status UtilsStatus
 
-func checkUtil(clientset *kubernetes.Clientset, config *rest.Config, podName string, containerName string, namespace string, utils []string) {
+func checkUtils(clientset *kubernetes.Clientset, config *rest.Config, podName string, containerName string, namespace string, utils []string) {
 	for _, util := range utils {
-		utilFound := checkUtilInContainer(clientset, config, namespace, podName, containerName, util)
+		utilFound, _ := checkUtilInContainer(clientset, config, namespace, podName, containerName, util)
 		status[podName][containerName][util] = utilFound
 	}
 }
@@ -199,17 +138,18 @@ func init() {
 	}
 }
 
-func getPods() (*corev1.PodList, error) {
+func getPods(clientset *kubernetes.Clientset, namespace string) (*corev1.PodList, error) {
 	var pods *corev1.PodList
-	pods, err := clientset.CoreV1().Pods(*namespace).List(context.TODO(), metaV1.ListOptions{})
+	pods, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metaV1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	return pods, nil
 }
 
-func verifyContainers(pods *corev1.PodList) (target []container, nontestable []container) {
+func verifyContainers(pods *corev1.PodList) (target []ContainerInfo, nontestable []ContainerInfo) {
 	status = make(UtilsStatus)
+	shell := make(map[string]map[string]string)
 
 	if len(utils) == 0 {
 		return nil, nil
@@ -218,9 +158,11 @@ func verifyContainers(pods *corev1.PodList) (target []container, nontestable []c
 	for _, pod := range pods.Items {
 		if pod.Status.Phase == "Running" {
 			status[pod.Name] = make(map[string]map[string]bool)
+			shell[pod.Name] = make(map[string]string)
 			for _, container := range pod.Spec.Containers {
 				status[pod.Name][container.Name] = make(map[string]bool)
-				checkUtil(clientset, config, pod.Name, container.Name, *namespace, utils)
+				checkUtils(clientset, config, pod.Name, container.Name, *namespace, utils)
+				shell[pod.Name][container.Name], _ = getShellInContainer(clientset, config, *namespace, pod.Name, container.Name)
 			}
 		}
 	}
@@ -231,19 +173,25 @@ func verifyContainers(pods *corev1.PodList) (target []container, nontestable []c
 				canBeTested := true
 				for _, present := range utilsStatus {
 					canBeTested = canBeTested && present
+					canBeTested = canBeTested && shell[pod][container] != ""
 				}
 				if canBeTested {
-					testableContainers = append(testableContainers, containerList{podName: pod, containerName: container})
+					target = append(target, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
 				} else {
-					nontestableContainers = append(nontestableContainers, containerList{podName: pod, containerName: container})
+					nontestable = append(nontestable, ContainerInfo{podName: pod, containerName: container, shell: shell[pod][container]})
 				}
 			}
 		}
 	}
+	if debug {
+		jb, _ := json2.MarshalIndent(status, "", "    ")
+		fmt.Println(string(jb))
+	}
+	return target, nontestable
 }
 
 func main() {
-	pods, err := getPods()
+	pods, err := getPods(clientset, *namespace)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(0)
@@ -253,23 +201,40 @@ func main() {
 		os.Exit(0)
 	}
 
-	if len(testableContainers) > 0 {
+	targetContainers, nontestableContainers = verifyContainers(pods)
+	if len(targetContainers) > 0 {
 		fmt.Println("Following containers can be tested:")
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
-		for _, list := range testableContainers {
+		for _, list := range targetContainers {
 			fmt.Fprintf(w, "%s\t%s\n", list.podName, list.containerName)
 		}
 		fmt.Fprintln(w, "\t")
 		w.Flush()
+	} else {
+		fmt.Println("Did not find any testable containers")
 	}
 
 	if len(nontestableContainers) > 0 {
 		fmt.Println("Following containers cannot be tested:")
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', 0)
-		for _, list := range nontestableContainers {
-			fmt.Fprintf(w, "%s\t%s\n", list.podName, list.containerName)
+		for _, container := range nontestableContainers {
+			fmt.Fprintf(w, "%s\t%s\n", container.podName, container.containerName)
 		}
 		fmt.Fprintln(w, "\t")
 		w.Flush()
+	}
+
+	if len(targetContainers) > 0 {
+
+		for _, container := range targetContainers {
+			var stdout, stderr bytes.Buffer
+			lsescript := bytes.NewBuffer(lse)
+			err := exec(clientset, config, *namespace, container.podName, container.containerName, container.shell, lsescript, &stdout, &stderr, false)
+			if err == nil {
+				fmt.Println(stdout.String())
+			} else {
+				fmt.Println(stderr.String())
+			}
+		}
 	}
 }
