@@ -3,6 +3,7 @@ module k8slse
 go 1.22.1
 
 require (
+	github.com/robert-nix/ansihtml v1.0.1
 	k8s.io/api v0.29.3
 	k8s.io/apimachinery v0.29.3
 	k8s.io/client-go v0.29.3

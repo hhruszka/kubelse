@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"flag"
 	"fmt"
+	"github.com/robert-nix/ansihtml"
 	"io"
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"text/tabwriter"
+	"time"
 )
 
 type ContainerInfo struct {
@@ -29,6 +31,12 @@ type ContainerInfo struct {
 	containerName string
 	shell         string
 	testable      bool
+}
+
+type Result struct {
+	podName       string
+	containerName string
+	scanReport    bytes.Buffer
 }
 
 //utils                                   []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/ps", "stat /bin/grep"}
@@ -151,6 +159,15 @@ func getDeployments(clientset *kubernetes.Clientset, namespace string) (*v1.Depl
 	return deployments, nil
 }
 
+func getStatefulSets(clientset *kubernetes.Clientset, namespace string) (*v1.StatefulSetList, error) {
+	var statefulSets *v1.StatefulSetList
+	statefulSets, err := clientset.AppsV1().StatefulSets(namespace).List(context.TODO(), metaV1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return statefulSets, nil
+}
+
 // mapToLabelSelector converts a map of key-value pairs to a Kubernetes label selector string.
 func mapToLabelSelector(labels map[string]string) string {
 	var selectorParts []string
@@ -161,6 +178,75 @@ func mapToLabelSelector(labels map[string]string) string {
 }
 
 func getUniquePods(clientset *kubernetes.Clientset, namespace string) (int, []corev1.Pod, error) {
+	var uniquePods []corev1.Pod
+
+	var deploymentPods map[string]int = make(map[string]int)
+	deployments, err := getDeployments(clientset, namespace)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	for _, deployment := range deployments.Items {
+		// to find all pods that are part of a given deployment we need to use deployment.Spec.Selector.MatchLabels
+		// from the deployment. This is essential.
+		options := metaV1.ListOptions{LabelSelector: mapToLabelSelector(deployment.Spec.Selector.MatchLabels)}
+		pods, err := getPods(clientset, namespace, options)
+		if err != nil {
+			continue
+		}
+		// we are interested only in one instance of a pod
+		if len(pods) > 0 {
+			uniquePods = append(uniquePods, pods[0])
+		}
+		for _, pod := range pods {
+			deploymentPods[pod.Name]++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[+] Found %d pods in %d deployments\n", len(deploymentPods), len(deployments.Items))
+
+	var statefulSetsPods map[string]int = make(map[string]int)
+	statefulSets, err := getStatefulSets(clientset, namespace)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	for _, statefulSet := range statefulSets.Items {
+		// to find all pods that are part of a given deployment we need to use deployment.Spec.Selector.MatchLabels
+		// from the deployment. This is essential.
+		options := metaV1.ListOptions{LabelSelector: mapToLabelSelector(statefulSet.Spec.Selector.MatchLabels)}
+		pods, err := getPods(clientset, namespace, options)
+		if err != nil {
+			continue
+		}
+		// we are interested only in one instance of a pod
+		//podCount += len(pods)
+		if len(pods) > 0 {
+			uniquePods = append(uniquePods, pods[0])
+		}
+		for _, pod := range pods {
+			statefulSetsPods[pod.Name]++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[+] Found %d pods in %d statefulsets\n", len(statefulSetsPods), len(statefulSets.Items))
+
+	podsList, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metaV1.ListOptions{})
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, pod := range podsList.Items {
+		if _, ok := deploymentPods[pod.Name]; ok {
+			continue
+		}
+		if _, ok := statefulSetsPods[pod.Name]; ok {
+			continue
+		}
+		uniquePods = append(uniquePods, pod)
+	}
+
+	return len(podsList.Items), uniquePods, nil
+}
+
+func getUniquePodsForDeployments(clientset *kubernetes.Clientset, namespace string) (int, []corev1.Pod, error) {
 	var uniquePods []corev1.Pod
 	var podCount int
 
@@ -204,7 +290,7 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 	}
 
 	// these are workers that check shell and utilities
-	for i := 0; i < 60; i++ {
+	for i := 0; i < 200; i++ {
 		contVerWorkerWg.Add(1)
 		go func() {
 			defer contVerWorkerWg.Done()
@@ -306,6 +392,7 @@ func init() {
 
 func main() {
 	fmt.Fprintln(os.Stderr, "[+] Started")
+	fmt.Fprintln(os.Stderr, "[+] Creating a list of unique pods")
 
 	//pods, err := getPods(clientset, *namespace, metaV1.ListOptions{})
 	podCount, pods, err := getUniquePods(clientset, *namespace)
@@ -318,7 +405,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[-] No pods found in namespace %q\n", *namespace)
 		os.Exit(0)
 	}
-	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d deployments related pods in %s namespace\n", len(pods), podCount, *namespace)
+	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d pods in %s namespace\n", len(pods), podCount, *namespace)
 	fmt.Fprintln(os.Stderr, "[*] Identifying testable containers")
 	targetContainers, nontestableContainers = verifyContainers(pods)
 	fmt.Fprintf(os.Stderr, "[+] Found %d unique containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
@@ -362,7 +449,7 @@ func main() {
 
 		var (
 			contProdChan    chan ContainerInfo = make(chan ContainerInfo, runtime.NumCPU()*2)
-			resultsProdChan chan bytes.Buffer  = make(chan bytes.Buffer, runtime.NumCPU()*2)
+			resultsProdChan chan Result        = make(chan Result, runtime.NumCPU()*2)
 		)
 
 		var (
@@ -393,7 +480,7 @@ func main() {
 					lsescript := bytes.NewBuffer(lsetmp)
 					err := exec(clientset, config, *namespace, container.podName, container.containerName, container.shell, lsescript, &stdout, &stderr, false)
 					if err == nil {
-						resultsProdChan <- stdout
+						resultsProdChan <- Result{container.podName, container.containerName, stdout}
 					}
 				}
 			}()
@@ -403,8 +490,22 @@ func main() {
 		go func() {
 			var cnt int
 			defer resultsCollectorWg.Done()
-			for report := range resultsProdChan {
-				fmt.Println(report.String())
+			for result := range resultsProdChan {
+				fileName := fmt.Sprintf("%s--%s--%s.html", result.podName, result.containerName, time.Now().Format("2006-01-02-150405"))
+				fileName, err = filepath.Abs(fileName)
+				if err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot create file path for a scan report for %s/%s container%s\n", result.podName, result.containerName)
+					fmt.Println(result.scanReport.String())
+					continue
+				}
+				html := ansihtml.ConvertToHTML(result.scanReport.Bytes())
+				err := os.WriteFile(fileName, html, 0666)
+				if err != nil {
+					_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot save scan report for %s/%s container to file %s\n", result.podName, result.containerName, fileName)
+					fmt.Println(result.scanReport.String())
+					continue
+				}
+				//fmt.Println(result.scanReport.String())
 				cnt++
 				fmt.Fprintf(os.Stderr, "\rAnalyzed %d containers", cnt)
 			}
