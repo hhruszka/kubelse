@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/util/homedir"
 	"os"
 	"path/filepath"
-	runtime2 "runtime"
+	"runtime"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -199,8 +199,6 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 		contCollectorWg sync.WaitGroup
 	)
 
-	status = make(UtilsStatus)
-
 	if len(utils) == 0 {
 		return nil, nil
 	}
@@ -323,7 +321,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d deployments related pods in %s namespace\n", len(pods), podCount, *namespace)
 	fmt.Fprintln(os.Stderr, "[*] Identifying testable containers")
 	targetContainers, nontestableContainers = verifyContainers(pods)
-	fmt.Fprintf(os.Stderr, "[+] Found %d containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
+	fmt.Fprintf(os.Stderr, "[+] Found %d unique containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
 
 	if len(targetContainers) > 0 {
 		fmt.Fprintf(os.Stderr, "[+] Following %d containers can be tested:\n", len(targetContainers))
@@ -335,6 +333,7 @@ func main() {
 		w.Flush()
 	} else {
 		fmt.Fprintln(os.Stderr, "[-] Did not find any testable containers")
+		return
 	}
 
 	if len(nontestableContainers) > 0 {
@@ -355,12 +354,15 @@ func main() {
 	}
 
 	if len(targetContainers) > 0 {
-		const WORKERSNO int = 100
-		runtime2.GOMAXPROCS(runtime2.NumCPU())
+		var workers int = 200
+
+		if len(targetContainers) < 200 {
+			workers = len(targetContainers)
+		}
 
 		var (
-			contProdChan    chan ContainerInfo = make(chan ContainerInfo, WORKERSNO)
-			resultsProdChan chan bytes.Buffer  = make(chan bytes.Buffer, WORKERSNO)
+			contProdChan    chan ContainerInfo = make(chan ContainerInfo, runtime.NumCPU()*2)
+			resultsProdChan chan bytes.Buffer  = make(chan bytes.Buffer, runtime.NumCPU()*2)
 		)
 
 		var (
@@ -369,7 +371,7 @@ func main() {
 			resultsCollectorWg sync.WaitGroup
 		)
 
-		// this neccessary when cross compiling on windows
+		// this is necessary, when cross-compiling on windows
 		lsetmp := bytes.Replace(lse, []byte("\r\n"), []byte("\n"), -1)
 		lsetmp = bytes.Replace(lsetmp, []byte("\r"), []byte(""), -1)
 
@@ -381,7 +383,7 @@ func main() {
 			}
 		}()
 
-		for id := 0; id < WORKERSNO; id++ {
+		for id := 0; id < workers; id++ {
 			var stdout, stderr bytes.Buffer
 
 			testWorkerWg.Add(1)
