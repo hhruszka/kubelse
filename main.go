@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/robert-nix/ansihtml"
+	"github.com/spf13/cobra"
 	"io"
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -57,25 +58,44 @@ type Result struct {
 	scanReport    bytes.Buffer
 }
 
-//utils                                   []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/ps", "stat /bin/grep"}
-
+// utils                                   []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/ps", "stat /bin/grep"}
+// App global variables
 var (
-	debug                 bool
-	kubeconfig            *string
-	namespace             *string
-	format                *string
 	config                *rest.Config
 	clientset             *kubernetes.Clientset
 	utils                 []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/grep"}
 	targetContainers      []ContainerInfo
 	nontestableContainers []ContainerInfo
-	logBuffer             bytes.Buffer
-	pod                   *string
-	container             *string
+	logBuffer             chan string = make(chan string, runtime.NumCPU())
+	logWg                 sync.WaitGroup
+)
+
+// CLI options variables
+var (
+	debug      bool
+	kubeconfig string
+	namespace  string
+	format     string
+	pod        string
+	container  string
+	directory  string
+	quiet      bool
 )
 
 //go:embed data/lse.sh
 var lse []byte
+
+func log(msg string) {
+	if !quiet {
+		logBuffer <- msg
+	}
+}
+
+func exit(code int) {
+	close(logBuffer)
+	logWg.Wait()
+
+}
 
 func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string, podName string, containerName string, cmd string, stdin io.Reader, stdout io.Writer, stderr io.Writer, tty bool) error {
 	req := clientset.CoreV1().RESTClient().
@@ -96,7 +116,7 @@ func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string
 	executor, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
 	if err != nil {
 		if debug {
-			fmt.Fprintf(os.Stderr, "[-] Execution failed with error code %d\n", err)
+			log(fmt.Sprintf("[-] Execution failed with error code %d\n", err))
 		}
 		return err
 	}
@@ -221,7 +241,7 @@ func getUniquePods(clientset *kubernetes.Clientset, namespace string) (int, []co
 			deploymentPods[pod.Name]++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "[+] Found %d pods in %d deployments\n", len(deploymentPods), len(deployments.Items))
+	log(fmt.Sprintf("[+] Found %d pods in %d deployments\n", len(deploymentPods), len(deployments.Items)))
 
 	var statefulSetsPods map[string]int = make(map[string]int)
 	statefulSets, err := getStatefulSets(clientset, namespace)
@@ -246,7 +266,7 @@ func getUniquePods(clientset *kubernetes.Clientset, namespace string) (int, []co
 			statefulSetsPods[pod.Name]++
 		}
 	}
-	fmt.Fprintf(os.Stderr, "[+] Found %d pods in %d statefulsets\n", len(statefulSetsPods), len(statefulSets.Items))
+	log(fmt.Sprintf("[+] Found %d pods in %d statefulsets\n", len(statefulSetsPods), len(statefulSets.Items)))
 
 	podsList, err := clientset.CoreV1().Pods(namespace).List(context.TODO(), metaV1.ListOptions{})
 	if err != nil {
@@ -314,8 +334,8 @@ func verifyContainers(pods []corev1.Pod) (target []ContainerInfo, nontestable []
 		go func() {
 			defer contVerWorkerWg.Done()
 			for container := range podProdChan {
-				container.shell, _ = getShellInContainer(clientset, config, *namespace, container.podName, container.containerName)
-				container.testable = checkUtilsv2(clientset, config, container.podName, container.containerName, *namespace, utils) && container.shell != ""
+				container.shell, _ = getShellInContainer(clientset, config, namespace, container.podName, container.containerName)
+				container.testable = checkUtilsv2(clientset, config, container.podName, container.containerName, namespace, utils) && container.shell != ""
 				conProdChan <- container
 			}
 		}()
@@ -363,11 +383,11 @@ func promptYN(prompt string) bool {
 	var response string
 
 	for {
-		fmt.Fprint(os.Stderr, prompt)
+		log(fmt.Sprintf(prompt))
 		_, err := fmt.Scanf("%s\n", &response)
 
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error reading input. Please try again.")
+			log(fmt.Sprintln("Error reading input. Please try again."))
 			continue
 		}
 
@@ -378,32 +398,21 @@ func promptYN(prompt string) bool {
 		} else if response == "N" {
 			return false
 		} else {
-			fmt.Fprintln(os.Stderr, "Invalid input. Please enter 'Y' or 'N'.")
+			log(fmt.Sprintln("Invalid input. Please enter 'Y' or 'N'."))
 		}
 	}
 }
 
-func init() {
+func Init() {
 	var err error
-	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
-	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	}
-	format = flag.String("o", "ansi", "Output format (ansi, text, html")
-	namespace = flag.String("namespace", "default", "CNF namespace")
-	pod = flag.String("pod", "", "Pod name")
-	container = flag.String("container", "", "Container name")
-	//flag.BoolVar(&debug, "debug", false, "turn on debugging mode")
-	flag.Parse()
 
-	if _, ok := map[string]int{"ansi": 0, "text": 0, "html": 0}[*format]; !ok {
+	if _, ok := map[string]int{"ansi": 0, "text": 0, "html": 0}[format]; !ok {
 		fmt.Fprintln(os.Stderr, "Invalid value of the output format option '-o'. Valid values are ansi, text or html\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
@@ -414,19 +423,22 @@ func init() {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
+
+	logWg.Add(1)
+	go func() {
+		defer logWg.Done()
+		for msg := range logBuffer {
+			fmt.Fprint(os.Stderr, msg)
+		}
+	}()
 }
 
 func saveScan(podName, containerName string, scanReport bytes.Buffer) {
-	fileName := fmt.Sprintf("%s-%s-%s.%s", podName, containerName, time.Now().Format("2006-01-02-150405"), *format)
-	fileName, err := filepath.Abs(fileName)
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot create file path for a scan report for %s/%s container%s\n", podName, containerName)
-		fmt.Println(scanReport.String())
-		return
-	}
+	fileName := fmt.Sprintf("%s-%s-%s.%s", podName, containerName, time.Now().Format("2006-01-02-150405"), format)
+	fileName = filepath.Join(directory, fileName)
 
 	var report []byte
-	switch *format {
+	switch format {
 	case "html":
 		report = []byte(htmlHeader)
 		report = append(report, ansihtml.ConvertToHTML(scanReport.Bytes())...)
@@ -435,47 +447,57 @@ func saveScan(podName, containerName string, scanReport bytes.Buffer) {
 		report = scanReport.Bytes()
 	}
 
-	err = os.WriteFile(fileName, report, 0666)
+	err := os.WriteFile(fileName, report, 0666)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot save scan report for %s/%s container to file %s\n", podName, containerName, fileName)
+		log(fmt.Sprintf("[!!] Cannot save scan report for %s/%s container to file %s\n", podName, containerName, fileName))
 		fmt.Println(scanReport.String())
 		return
 	}
 }
 
 func scan(pods []corev1.Pod, namespace string) {
-	fmt.Fprintln(os.Stderr, "[*] Identifying testable containers")
+	log(fmt.Sprintln("[*] Identifying testable containers"))
 	targetContainers, nontestableContainers = verifyContainers(pods)
-	fmt.Fprintf(os.Stderr, "[+] Found %d unique containers\n", len(targetContainers)+len(nontestableContainers))
+	log(fmt.Sprintf("[+] Found %d unique containers\n", len(targetContainers)+len(nontestableContainers)))
 
 	if len(targetContainers) > 0 {
-		fmt.Fprintf(os.Stderr, "[+] Following %d containers can be tested:\n", len(targetContainers))
-		w := tabwriter.NewWriter(os.Stderr, 0, 0, 1, ' ', 0)
+		log(fmt.Sprintf("[+] Following %d containers can be tested:\n", len(targetContainers)))
+		var buf bytes.Buffer
+		w := tabwriter.NewWriter(&buf, 0, 0, 1, ' ', 0)
 		for _, list := range targetContainers {
 			fmt.Fprintf(w, "%s\t%s\n", list.podName, list.containerName)
 		}
 		fmt.Fprintln(w, "\t")
 		w.Flush()
+		log(buf.String())
 	} else {
-		fmt.Fprintln(os.Stderr, "[-] Did not find any testable containers")
+		log(fmt.Sprintln("[-] Did not find any testable containers"))
 		return
 	}
 
 	if len(nontestableContainers) > 0 {
-		fmt.Fprintf(os.Stderr, "[-] Following %d containers cannot be tested:\n", len(nontestableContainers))
-		w := tabwriter.NewWriter(os.Stderr, 0, 0, 1, ' ', 0)
+		log(fmt.Sprintf("[-] Following %d containers cannot be tested:\n", len(nontestableContainers)))
+		var buf bytes.Buffer
+		w := tabwriter.NewWriter(&buf, 0, 0, 1, ' ', 0)
 		for _, container := range nontestableContainers {
 			fmt.Fprintf(w, "%s\t%s\n", container.podName, container.containerName)
 		}
 		fmt.Fprintln(w, "\t")
 		w.Flush()
+		log(buf.String())
 	}
 
-	if promptYN("\nDo you wish to proceed with testing? (Y/N): ") {
-		fmt.Fprintln(os.Stderr, "Proceeding with testing...")
-	} else {
-		fmt.Fprintln(os.Stderr, "Action cancelled.")
-		os.Exit(1)
+	//for range logBuffer {
+	//	time.Sleep(time.Millisecond)
+	//}
+
+	if !quiet {
+		if promptYN("\nDo you wish to proceed with testing? (Y/N): ") {
+			log(fmt.Sprintln("Proceeding with testing..."))
+		} else {
+			log(fmt.Sprintln("Action cancelled."))
+			os.Exit(1)
+		}
 	}
 
 	if len(targetContainers) > 0 {
@@ -517,7 +539,7 @@ func scan(pods []corev1.Pod, namespace string) {
 				for container := range contProdChan {
 					lsescript := bytes.NewBuffer(lsetmp)
 					shell := container.shell
-					if *format == "text" {
+					if format == "text" {
 						shell = fmt.Sprintf("%s -s -- -c", shell)
 					}
 					err := exec(clientset, config, namespace, container.podName, container.containerName, shell, lsescript, &stdout, &stderr, false)
@@ -536,8 +558,9 @@ func scan(pods []corev1.Pod, namespace string) {
 			for result := range resultsProdChan {
 				saveScan(result.podName, result.containerName, result.scanReport)
 				cnt++
-				fmt.Fprintf(os.Stderr, "\rAnalyzed %d containers", cnt)
+				log(fmt.Sprintf("\rAnalyzed %d containers", cnt))
 			}
+			log(fmt.Sprintf("\n"))
 		}()
 
 		contFanOutWg.Wait()
@@ -549,23 +572,23 @@ func scan(pods []corev1.Pod, namespace string) {
 }
 
 func scanPod(podName, namespace string) {
-	fmt.Fprintln(os.Stderr, "[+] Started")
-	fmt.Fprintln(os.Stderr, "[+] Searching for %s pod", podName)
+	log(fmt.Sprintln("[+] Started"))
+	log(fmt.Sprintf("[+] Searching for %s pod\n", podName))
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metaV1.GetOptions{})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log(fmt.Sprintln(err))
 		os.Exit(1)
 	}
-	fmt.Fprintln(os.Stderr, "[+] Pod %s found", podName)
+	log(fmt.Sprintf("[+] Pod %s found\n", podName))
 	scan([]corev1.Pod{*pod}, namespace)
 }
 
 func scanContainer(podName, containerName, namespace string) {
-	fmt.Fprintln(os.Stderr, "[+] Started")
-	fmt.Fprintln(os.Stderr, "[+] Searching for %s/%s container", podName, containerName)
+	log(fmt.Sprintln("[+] Started"))
+	log(fmt.Sprintf("[+] Searching for %s/%s container\n", podName, containerName))
 	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metaV1.GetOptions{})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log(fmt.Sprintln(err))
 		os.Exit(1)
 	}
 	found := false
@@ -576,11 +599,11 @@ func scanContainer(podName, containerName, namespace string) {
 		}
 	}
 	if !found {
-		fmt.Fprintln(os.Stderr, "[+] Container %s/%s not found. Aborting", podName, containerName)
+		log(fmt.Sprintf("[+] Container %s/%s not found. Aborting\n", podName, containerName))
 		os.Exit(1)
 	}
 
-	fmt.Fprintln(os.Stderr, "[+] Container %s/%s found", podName, containerName)
+	log(fmt.Sprintf("[+] Container %s/%s found\n", podName, containerName))
 	// this is necessary, when cross-compiling on windows
 	lsetmp := bytes.Replace(lse, []byte("\r\n"), []byte("\n"), -1)
 	lsetmp = bytes.Replace(lsetmp, []byte("\r"), []byte(""), -1)
@@ -591,27 +614,28 @@ func scanContainer(podName, containerName, namespace string) {
 	testable := checkUtilsv2(clientset, config, podName, containerName, namespace, utils) && shell != ""
 
 	if !testable {
-		fmt.Fprintf(os.Stderr, "[!!] Container %s/%s is not testable.", podName, containerName)
+		log(fmt.Sprintf("[!!] Container %s/%s is not testable. Aborting.\n", podName, containerName))
 		os.Exit(1)
 	}
 
-	if *format == "text" {
+	if format == "text" {
 		shell = fmt.Sprintf("%s -s -- -c", shell)
 	}
 
+	log(fmt.Sprintf("[+] Container %s/%s is testable.\n[+] Proceeding with tesitng.\n", podName, containerName))
 	var stdout, stderr bytes.Buffer
 
 	err = exec(clientset, config, namespace, podName, containerName, shell, lsescript, &stdout, &stderr, false)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		log(fmt.Sprintln(err))
 		os.Exit(1)
 	}
-
+	saveScan(podName, containerName, stdout)
 }
 
 func scanNamespace(namespace string) {
-	fmt.Fprintln(os.Stderr, "[+] Started")
-	fmt.Fprintln(os.Stderr, "[+] Creating a list of unique pods")
+	log(fmt.Sprintln("[+] Started"))
+	log(fmt.Sprintln("[+] Creating a list of unique pods"))
 
 	//pods, err := getPods(clientset, *namespace, metaV1.ListOptions{})
 	podCount, pods, err := getUniquePods(clientset, namespace)
@@ -621,22 +645,65 @@ func scanNamespace(namespace string) {
 	}
 
 	if len(pods) == 0 {
-		fmt.Fprintf(os.Stderr, "[-] No pods found in namespace %q\n", namespace)
+		log(fmt.Sprintf("[-] No pods found in namespace %q\n", namespace))
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d pods in %s namespace\n", len(pods), podCount, namespace)
+	log(fmt.Sprintf("[+] Found %d unique pods out of %d pods in %s namespace\n", len(pods), podCount, namespace))
 	scan(pods, namespace)
 }
 
-func main() {
+func run() {
+	Init()
 	switch {
-	case *pod != "" && *container == "":
-		scanPod(*pod, *namespace)
-	case *pod != "" && *container != "":
-		scanContainer(*pod, *container, *namespace)
-	case *pod == "" && *container == "":
-		scanNamespace(*namespace)
+	case pod != "" && container == "":
+		scanPod(pod, namespace)
+	case pod != "" && container != "":
+		scanContainer(pod, container, namespace)
+	case pod == "" && container == "":
+		scanNamespace(namespace)
 	default:
 		flag.Usage()
+	}
+
+	close(logBuffer)
+	logWg.Wait()
+}
+
+func main() {
+
+	var cmd = &cobra.Command{
+		Use:   "k8slse",
+		Short: "k8slse is a command line application that enumerates containers with Linux Smart Enumeration script",
+		Long: `
+This application enumerates containers in k8s environment with the Linux Smart Enumeration script. 
+It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
+It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
+It saves an enumeration report for each container separately in a file. The report can be saved in 
+a plain text, ansi or html output format.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			run()
+		},
+	}
+
+	if home := homedir.HomeDir(); home != "" {
+		cmd.Flags().StringVarP(&kubeconfig, "kubeconfig", "k", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		cmd.Flags().StringVarP(&kubeconfig, "kubeconfig", "k", "", "absolute path to the kubeconfig file")
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
+	cmd.Flags().StringVarP(&directory, "directory", "d", workingDirectory, "a directory where reports should be saved to")
+	cmd.Flags().StringVarP(&format, "output", "o", "ansi", "Output format: ansi, text, or html")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "CNF namespace")
+	cmd.Flags().StringVarP(&pod, "pod", "p", "", "a pod name, if not provided then all containers in a namespace will be enumerated.")
+	cmd.Flags().StringVarP(&container, "container", "c", "", "a container name")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "quiet execution - no status information")
+
+	if err := cmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
 }
