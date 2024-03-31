@@ -26,6 +26,24 @@ import (
 	"time"
 )
 
+var (
+	htmlHeader = `
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="application/xml+xhtml; charset=UTF-8"/>
+<title>stdin</title>
+</head>
+<body style="color:white; background-color:black">
+<pre>`
+
+	htmlFooter = `
+</pre>
+</body>
+</html>`
+)
+
 type ContainerInfo struct {
 	podName       string
 	containerName string
@@ -45,6 +63,7 @@ var (
 	debug                 bool
 	kubeconfig            *string
 	namespace             *string
+	format                *string
 	config                *rest.Config
 	clientset             *kubernetes.Clientset
 	utils                 []string = []string{"stat /usr/bin/find", "stat /bin/cat", "stat /bin/grep"}
@@ -211,7 +230,7 @@ func getUniquePods(clientset *kubernetes.Clientset, namespace string) (int, []co
 	}
 
 	for _, statefulSet := range statefulSets.Items {
-		// to find all pods that are part of a given deployment we need to use deployment.Spec.Selector.MatchLabels
+		// to find all pods that are part of a given deployment we need to use statefulSet.Spec.Selector.MatchLabels
 		// from the deployment. This is essential.
 		options := metaV1.ListOptions{LabelSelector: mapToLabelSelector(statefulSet.Spec.Selector.MatchLabels)}
 		pods, err := getPods(clientset, namespace, options)
@@ -371,11 +390,18 @@ func init() {
 	} else {
 		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
+	format = flag.String("o", "ansi", "Output format (ansi, text, html")
 	namespace = flag.String("namespace", "default", "CNF namespace")
 	pod = flag.String("pod", "", "Pod name")
 	container = flag.String("container", "", "Container name")
-	flag.BoolVar(&debug, "debug", false, "turn on debugging mode")
+	//flag.BoolVar(&debug, "debug", false, "turn on debugging mode")
 	flag.Parse()
+
+	if _, ok := map[string]int{"ansi": 0, "text": 0, "html": 0}[*format]; !ok {
+		fmt.Fprintln(os.Stderr, "Invalid value of the output format option '-o'. Valid values are ansi, text or html\n")
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
@@ -390,25 +416,37 @@ func init() {
 	}
 }
 
-func main() {
-	fmt.Fprintln(os.Stderr, "[+] Started")
-	fmt.Fprintln(os.Stderr, "[+] Creating a list of unique pods")
-
-	//pods, err := getPods(clientset, *namespace, metaV1.ListOptions{})
-	podCount, pods, err := getUniquePods(clientset, *namespace)
+func saveScan(podName, containerName string, scanReport bytes.Buffer) {
+	fileName := fmt.Sprintf("%s-%s-%s.%s", podName, containerName, time.Now().Format("2006-01-02-150405"), *format)
+	fileName, err := filepath.Abs(fileName)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(0)
+		_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot create file path for a scan report for %s/%s container%s\n", podName, containerName)
+		fmt.Println(scanReport.String())
+		return
 	}
 
-	if len(pods) == 0 {
-		fmt.Fprintf(os.Stderr, "[-] No pods found in namespace %q\n", *namespace)
-		os.Exit(0)
+	var report []byte
+	switch *format {
+	case "html":
+		report = []byte(htmlHeader)
+		report = append(report, ansihtml.ConvertToHTML(scanReport.Bytes())...)
+		report = append(report, []byte(htmlFooter)...)
+	default:
+		report = scanReport.Bytes()
 	}
-	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d pods in %s namespace\n", len(pods), podCount, *namespace)
+
+	err = os.WriteFile(fileName, report, 0666)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot save scan report for %s/%s container to file %s\n", podName, containerName, fileName)
+		fmt.Println(scanReport.String())
+		return
+	}
+}
+
+func scan(pods []corev1.Pod, namespace string) {
 	fmt.Fprintln(os.Stderr, "[*] Identifying testable containers")
 	targetContainers, nontestableContainers = verifyContainers(pods)
-	fmt.Fprintf(os.Stderr, "[+] Found %d unique containers in %s namespace\n", len(targetContainers)+len(nontestableContainers), *namespace)
+	fmt.Fprintf(os.Stderr, "[+] Found %d unique containers\n", len(targetContainers)+len(nontestableContainers))
 
 	if len(targetContainers) > 0 {
 		fmt.Fprintf(os.Stderr, "[+] Following %d containers can be tested:\n", len(targetContainers))
@@ -478,7 +516,11 @@ func main() {
 				defer testWorkerWg.Done()
 				for container := range contProdChan {
 					lsescript := bytes.NewBuffer(lsetmp)
-					err := exec(clientset, config, *namespace, container.podName, container.containerName, container.shell, lsescript, &stdout, &stderr, false)
+					shell := container.shell
+					if *format == "text" {
+						shell = fmt.Sprintf("%s -s -- -c", shell)
+					}
+					err := exec(clientset, config, namespace, container.podName, container.containerName, shell, lsescript, &stdout, &stderr, false)
 					if err == nil {
 						resultsProdChan <- Result{container.podName, container.containerName, stdout}
 					}
@@ -489,23 +531,10 @@ func main() {
 		resultsCollectorWg.Add(1)
 		go func() {
 			var cnt int
+
 			defer resultsCollectorWg.Done()
 			for result := range resultsProdChan {
-				fileName := fmt.Sprintf("%s--%s--%s.html", result.podName, result.containerName, time.Now().Format("2006-01-02-150405"))
-				fileName, err = filepath.Abs(fileName)
-				if err != nil {
-					_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot create file path for a scan report for %s/%s container%s\n", result.podName, result.containerName)
-					fmt.Println(result.scanReport.String())
-					continue
-				}
-				html := ansihtml.ConvertToHTML(result.scanReport.Bytes())
-				err := os.WriteFile(fileName, html, 0666)
-				if err != nil {
-					_, _ = fmt.Fprintf(os.Stderr, "[!!] Cannot save scan report for %s/%s container to file %s\n", result.podName, result.containerName, fileName)
-					fmt.Println(result.scanReport.String())
-					continue
-				}
-				//fmt.Println(result.scanReport.String())
+				saveScan(result.podName, result.containerName, result.scanReport)
 				cnt++
 				fmt.Fprintf(os.Stderr, "\rAnalyzed %d containers", cnt)
 			}
@@ -516,5 +545,98 @@ func main() {
 		testWorkerWg.Wait()
 		close(resultsProdChan)
 		resultsCollectorWg.Wait()
+	}
+}
+
+func scanPod(podName, namespace string) {
+	fmt.Fprintln(os.Stderr, "[+] Started")
+	fmt.Fprintln(os.Stderr, "[+] Searching for %s pod", podName)
+	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metaV1.GetOptions{})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "[+] Pod %s found", podName)
+	scan([]corev1.Pod{*pod}, namespace)
+}
+
+func scanContainer(podName, containerName, namespace string) {
+	fmt.Fprintln(os.Stderr, "[+] Started")
+	fmt.Fprintln(os.Stderr, "[+] Searching for %s/%s container", podName, containerName)
+	pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metaV1.GetOptions{})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	found := false
+	for _, container := range pod.Spec.Containers {
+		if container.Name == containerName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		fmt.Fprintln(os.Stderr, "[+] Container %s/%s not found. Aborting", podName, containerName)
+		os.Exit(1)
+	}
+
+	fmt.Fprintln(os.Stderr, "[+] Container %s/%s found", podName, containerName)
+	// this is necessary, when cross-compiling on windows
+	lsetmp := bytes.Replace(lse, []byte("\r\n"), []byte("\n"), -1)
+	lsetmp = bytes.Replace(lsetmp, []byte("\r"), []byte(""), -1)
+
+	lsescript := bytes.NewBuffer(lsetmp)
+
+	shell, _ := getShellInContainer(clientset, config, namespace, podName, containerName)
+	testable := checkUtilsv2(clientset, config, podName, containerName, namespace, utils) && shell != ""
+
+	if !testable {
+		fmt.Fprintf(os.Stderr, "[!!] Container %s/%s is not testable.", podName, containerName)
+		os.Exit(1)
+	}
+
+	if *format == "text" {
+		shell = fmt.Sprintf("%s -s -- -c", shell)
+	}
+
+	var stdout, stderr bytes.Buffer
+
+	err = exec(clientset, config, namespace, podName, containerName, shell, lsescript, &stdout, &stderr, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+}
+
+func scanNamespace(namespace string) {
+	fmt.Fprintln(os.Stderr, "[+] Started")
+	fmt.Fprintln(os.Stderr, "[+] Creating a list of unique pods")
+
+	//pods, err := getPods(clientset, *namespace, metaV1.ListOptions{})
+	podCount, pods, err := getUniquePods(clientset, namespace)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if len(pods) == 0 {
+		fmt.Fprintf(os.Stderr, "[-] No pods found in namespace %q\n", namespace)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "[+] Found %d unique pods out of %d pods in %s namespace\n", len(pods), podCount, namespace)
+	scan(pods, namespace)
+}
+
+func main() {
+	switch {
+	case *pod != "" && *container == "":
+		scanPod(*pod, *namespace)
+	case *pod != "" && *container != "":
+		scanContainer(*pod, *container, *namespace)
+	case *pod == "" && *container == "":
+		scanNamespace(*namespace)
+	default:
+		flag.Usage()
 	}
 }

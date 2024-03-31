@@ -424,11 +424,11 @@ lse_test() { #(
   if [ "$non_met_deps" ]; then
     cecho " ${grey}skip\n"
     # In "selection mode" we print the missed dependencies
-    if [ "$lse_selection" ]; then
+#    if [ "$lse_selection" ]; then
       cecho "${red}---\n"
       cecho "Dependencies not met:$reset $non_met_deps\n"
       cecho "${red}---$reset\n"
-    fi
+#    fi
     return 1
   fi
 
