@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/robert-nix/ansihtml"
 	"github.com/spf13/cobra"
 	"io"
@@ -80,6 +81,7 @@ var (
 	container  string
 	directory  string
 	quiet      bool
+	list       bool
 )
 
 //go:embed data/lse.sh
@@ -178,6 +180,11 @@ func checkUtilsv2(clientset *kubernetes.Clientset, config *rest.Config, podName 
 		}
 	}
 	return utilFound
+}
+
+func getPod(podName, namespace string) (*corev1.Pod, error) {
+	_pod, err := clientset.CoreV1().Pods(namespace).Get(context.TODO(), podName, metaV1.GetOptions{})
+	return _pod, err
 }
 
 func getPods(clientset *kubernetes.Clientset, namespace string, options metaV1.ListOptions) ([]corev1.Pod, error) {
@@ -663,6 +670,54 @@ func scanNamespace(namespace string) error {
 	return err
 }
 
+func listContainers() error {
+	log(fmt.Sprintln("[+] Started"))
+	log(fmt.Sprintf("[+] Creating a list of pods/containers for %s namespace\n", namespace))
+
+	switch {
+	case pod != "":
+		_pod, err := getPod(pod, namespace)
+		if err != nil {
+			//log(err.Error())
+			return err
+		}
+		var buf bytes.Buffer
+
+		log(fmt.Sprintf("[+] Found %d containers in %s pod\n", len(_pod.Spec.Containers), _pod.Name))
+		t := table.NewWriter()
+		t.SetOutputMirror(&buf)
+		t.AppendHeader(table.Row{"#", "Pod", "Container"})
+		for idx, cntr := range _pod.Spec.Containers {
+			t.AppendRows([]table.Row{{idx + 1, _pod.Name, cntr.Name}})
+			t.AppendSeparator()
+		}
+		t.Render()
+		log(buf.String())
+	case pod == "":
+		pods, err := getPods(clientset, namespace, metaV1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		var buf bytes.Buffer
+
+		t := table.NewWriter()
+		t.SetOutputMirror(&buf)
+		t.AppendHeader(table.Row{"#", "Pod", "Container"})
+		cnt := 1
+		for _, _pod := range pods {
+			for _, cntr := range _pod.Spec.Containers {
+				t.AppendRows([]table.Row{{cnt, _pod.Name, cntr.Name}})
+				cnt++
+			}
+			t.AppendSeparator()
+		}
+
+		t.Render()
+		log(buf.String())
+	}
+	return nil
+}
+
 func run() error {
 	// go executes defer statements in thenLIFO order
 	defer logWg.Wait()
@@ -674,6 +729,8 @@ func run() error {
 	}
 
 	switch {
+	case list:
+		return listContainers()
 	case pod != "" && container == "":
 		if err := scanPod(pod, namespace); err != nil {
 			//log(err.Error())
@@ -725,6 +782,7 @@ a plain text, ansi or html output format.`,
 	cmd.Flags().StringVarP(&pod, "pod", "p", "", "a pod name, if not provided then all containers in a namespace will be enumerated.")
 	cmd.Flags().StringVarP(&container, "container", "c", "", "a container name")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "quiet execution - no status information")
+	cmd.Flags().BoolVarP(&list, "list", "l", false, "list containers")
 
 	// Disable automatic printing of usage when an error occurs
 	cmd.SilenceUsage = true
