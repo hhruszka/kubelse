@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
+	exec2 "k8s.io/client-go/util/exec"
 	"k8s.io/client-go/util/homedir"
 	"os"
 	"path/filepath"
@@ -99,7 +100,7 @@ func exit(code int) {
 
 }
 
-func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string, podName string, containerName string, cmd string, stdin io.Reader, stdout io.Writer, stderr io.Writer, tty bool) error {
+func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string, podName string, containerName string, cmd string, stdin io.Reader, stdout io.Writer, stderr io.Writer, tty bool) (int, error) {
 	req := clientset.CoreV1().RESTClient().
 		Post().
 		Resource("pods").
@@ -120,7 +121,7 @@ func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string
 		if debug {
 			log(fmt.Sprintf("[-] Execution failed with error code %d\n", err))
 		}
-		return err
+		return -1, err
 	}
 
 	err = executor.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
@@ -129,23 +130,28 @@ func exec(clientset *kubernetes.Clientset, config *rest.Config, namespace string
 		Stderr: stderr,
 		Tty:    false,
 	})
+	if err != nil {
+		exitError := exec2.CodeExitError{}
+		if errors.As(err, &exitError) {
+			return exitError.Code, exitError
+		}
+		return -1, err
+	}
 
-	//fmt.Println(stdout)
-
-	return err
+	return 0, nil
 }
 
 // checkShellsInContainer checks for the presence of specified shells in the given container of a pod.
 func getShellInContainer(clientset *kubernetes.Clientset, config *rest.Config, namespace string, podName string, containerName string) (string, error) {
 
 	var stdout, stderr bytes.Buffer
-	err := exec(clientset, config, namespace, podName, containerName, "sh --version", nil, &stdout, &stderr, false)
+	_, err := exec(clientset, config, namespace, podName, containerName, "sh --version", nil, &stdout, &stderr, false)
 
 	if err == nil {
 		return "sh", nil
 	}
 
-	err = exec(clientset, config, namespace, podName, containerName, "bash --version", nil, &stdout, &stderr, false)
+	_, err = exec(clientset, config, namespace, podName, containerName, "bash --version", nil, &stdout, &stderr, false)
 	if err == nil {
 		return "bash", nil
 	}
@@ -155,8 +161,8 @@ func getShellInContainer(clientset *kubernetes.Clientset, config *rest.Config, n
 
 func checkUtilInContainer(clientset *kubernetes.Clientset, config *rest.Config, namespace, podName, containerName string, util string) (bool, error) {
 	var stdout, stderr bytes.Buffer
-	err := exec(clientset, config, namespace, podName, containerName, util, nil, &stdout, &stderr, false)
-	return err == nil, err
+	retCode, err := exec(clientset, config, namespace, podName, containerName, util, nil, &stdout, &stderr, false)
+	return retCode != 127 && retCode != 128, err
 }
 
 type UtilsStatus map[string]map[string]map[string]bool
@@ -550,7 +556,7 @@ func scan(pods []corev1.Pod, namespace string) error {
 					if format == "text" {
 						shell = fmt.Sprintf("%s -s -- -c", shell)
 					}
-					err := exec(clientset, config, namespace, container.podName, container.containerName, shell, lsescript, &stdout, &stderr, false)
+					_, err := exec(clientset, config, namespace, container.podName, container.containerName, shell, lsescript, &stdout, &stderr, false)
 					if err != nil {
 						log(err.Error())
 					}
@@ -638,7 +644,7 @@ func scanContainer(podName, containerName, namespace string) error {
 	log(fmt.Sprintf("[+] Container %s/%s is testable.\n[+] Proceeding with tesitng.\n", podName, containerName))
 	var stdout, stderr bytes.Buffer
 
-	err = exec(clientset, config, namespace, podName, containerName, shell, lsescript, &stdout, &stderr, false)
+	_, err = exec(clientset, config, namespace, podName, containerName, shell, lsescript, &stdout, &stderr, false)
 	if err != nil {
 		//log(fmt.Sprintln(err))
 		//os.Exit(1)

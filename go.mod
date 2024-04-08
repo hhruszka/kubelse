@@ -3,6 +3,7 @@ module k8slse
 go 1.22.1
 
 require (
+	github.com/jedib0t/go-pretty/v6 v6.5.6
 	github.com/robert-nix/ansihtml v1.0.1
 	github.com/spf13/cobra v1.8.0
 	k8s.io/api v0.29.3
@@ -25,7 +26,6 @@ require (
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/imdario/mergo v0.3.6 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/jedib0t/go-pretty/v6 v6.5.6 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
