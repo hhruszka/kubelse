@@ -424,8 +424,6 @@ func Init() error {
 	var err error
 
 	if _, ok := map[string]int{"ansi": 0, "text": 0, "html": 0}[format]; !ok {
-		//fmt.Fprintln(os.Stderr, "Invalid value of the output format option '-o'. Valid values are ansi, text or html\n")
-		//flag.Usage()
 		return errors.New("Invalid value of the output format option '-o'. Valid values are ansi, text or html")
 	}
 
@@ -469,8 +467,6 @@ func saveScan(podName, containerName string, scanReport bytes.Buffer) error {
 
 	err := os.WriteFile(fileName, report, 0666)
 	if err != nil {
-		//log(fmt.Sprintf("[!!] Cannot save scan report for %s/%s container to file %s\n", podName, containerName, fileName))
-		//fmt.Println(scanReport.String())
 		return err
 	}
 	return nil
@@ -493,8 +489,6 @@ func scan(pods []corev1.Pod, namespace string) error {
 		log(buf.String())
 	} else {
 		return errors.New("[-] Did not find any testable containers")
-		//log(fmt.Sprintln("[-] Did not find any testable containers"))
-		//return
 	}
 
 	if len(nontestableContainers) > 0 {
@@ -513,7 +507,6 @@ func scan(pods []corev1.Pod, namespace string) error {
 		if promptYN("\nDo you wish to proceed with testing? (Y/N): ") {
 			log(fmt.Sprintln("Proceeding with testing..."))
 		} else {
-			//log(fmt.Sprintln("Action cancelled."))
 			return errors.New("Action cancelled.")
 		}
 	}
@@ -636,8 +629,6 @@ func scanContainer(podName, containerName, namespace string) error {
 	testable := checkUtilsv2(clientset, config, podName, containerName, namespace, utils) && shell != ""
 
 	if !testable {
-		//log(fmt.Sprintf("[!!] Container %s/%s is not testable. Aborting.\n", podName, containerName))
-		//os.Exit(1)
 		return errors.New(fmt.Sprintf("[!!] Container %s/%s is not testable. Aborting.\n", podName, containerName))
 	}
 
@@ -650,8 +641,6 @@ func scanContainer(podName, containerName, namespace string) error {
 
 	_, err = exec(clientset, config, namespace, podName, containerName, shell, lsescript, &stdout, &stderr, false)
 	if err != nil {
-		//log(fmt.Sprintln(err))
-		//os.Exit(1)
 		return err
 	}
 	err = saveScan(podName, containerName, stdout)
@@ -739,13 +728,14 @@ func run() error {
 	}
 
 	if err := Init(); err != nil {
-		//log(err.Error())
 		return err
 	}
 
-	switch {
-	case list:
+	if list {
 		return listContainers()
+	}
+
+	switch {
 	case pod != "" && container == "":
 		if err := scanPod(pod, namespace); err != nil {
 			//log(err.Error())
@@ -761,6 +751,13 @@ func run() error {
 			//log(err.Error())
 			return err
 		}
+	}
+	return nil
+}
+
+func untangleOption(option string) []string {
+	if len(option) > 0 {
+		return strings.Split(option, ",")
 	}
 	return nil
 }
@@ -794,8 +791,8 @@ a plain text, ansi or html output format.`,
 	cmd.Flags().StringVarP(&directory, "directory", "d", workingDirectory, "a directory where reports should be saved to")
 	cmd.Flags().StringVarP(&format, "output", "o", "ansi", "Output format: ansi, text, or html")
 	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "CNF namespace")
-	cmd.Flags().StringVarP(&pod, "pod", "p", "", "a pod name, if not provided then all containers in a namespace will be enumerated.")
-	cmd.Flags().StringVarP(&container, "container", "c", "", "a container name")
+	cmd.Flags().StringVarP(&pod, "pods", "p", "", "a pod or pods, which containers are to be enumerated, if not provided then all containers in a namespace will be enumerated.")
+	cmd.Flags().StringVarP(&container, "containers", "c", "", "a container or containers to be enumerated")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "quiet execution - no status information")
 	cmd.Flags().BoolVarP(&version, "version", "v", false, "prints "+appName+" version")
 	cmd.Flags().BoolVarP(&list, "list", "l", false, "list containers")
