@@ -82,8 +82,12 @@ var (
 	container  string
 	directory  string
 	quiet      bool
+	version    bool
 	list       bool
 )
+
+var appName string = filepath.Base(os.Args[0])
+var appVersion string
 
 //go:embed data/lse.sh
 var lse []byte
@@ -729,6 +733,11 @@ func run() error {
 	defer logWg.Wait()
 	defer close(logBuffer)
 
+	if version {
+		fmt.Println(appName, appVersion)
+		return nil
+	}
+
 	if err := Init(); err != nil {
 		//log(err.Error())
 		return err
@@ -759,8 +768,8 @@ func run() error {
 func main() {
 
 	var cmd = &cobra.Command{
-		Use:   "k8slse",
-		Short: "k8slse is a command line application that enumerates containers with Linux Smart Enumeration script",
+		Use:   appName + " [flags]",
+		Short: appName + " is a command line application that enumerates containers with Linux Smart Enumeration script",
 		Long: `
 This application enumerates containers in k8s environment with the Linux Smart Enumeration script. 
 It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
@@ -788,6 +797,7 @@ a plain text, ansi or html output format.`,
 	cmd.Flags().StringVarP(&pod, "pod", "p", "", "a pod name, if not provided then all containers in a namespace will be enumerated.")
 	cmd.Flags().StringVarP(&container, "container", "c", "", "a container name")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "quiet execution - no status information")
+	cmd.Flags().BoolVarP(&version, "version", "v", false, "prints "+appName+" version")
 	cmd.Flags().BoolVarP(&list, "list", "l", false, "list containers")
 
 	// Disable automatic printing of usage when an error occurs
