@@ -24,15 +24,15 @@ Options:
 
 Test all unique pods' containers in a 'my-namespace' namespace
 ```
-./bptcnflse -n my-namespace
+./kubelse -n my-namespace
 ```
 
 Test containers of a pod "pod1" in a 'my-namespace' namespace
 ```
-./bptcnflse -n my-namespace -p pod1
+./kubelse -n my-namespace -p pod1
 ```
 
 Test all unique pods' containers in a 'my-namespace' namespace, save reports in 'html' formate in a directory "/tmp/report"
 ```
-./bptcnflse -n my-namespace -o html -d /tmp/report
+./kubelse -n my-namespace -o html -d /tmp/report
 ```
