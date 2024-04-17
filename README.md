@@ -1,5 +1,5 @@
 
-This application enumerates containers in k8s environment with the Linux Smart Enumeration script.
+This application enumerates containers in k8s environment with the [Linux Smart Enumeration script](https://github.com/diego-treitos/linux-smart-enumeration?tab=readme-ov-file).
 It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
 It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
 It saves an enumeration report for each container separately in a file. The report can be saved in
