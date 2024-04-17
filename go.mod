@@ -3,6 +3,7 @@ module k8slse
 go 1.22.1
 
 require (
+	github.com/hhruszka/k8sexec v1.0.1
 	github.com/jedib0t/go-pretty/v6 v6.5.6
 	github.com/robert-nix/ansihtml v1.0.1
 	github.com/spf13/cobra v1.8.0
