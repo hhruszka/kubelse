@@ -57,8 +57,7 @@ var cmd = &cobra.Command{
 	Short: appName + " is a command line application that enumerates containers with Linux Smart Enumeration script",
 	Long: `
 This application enumerates containers in k8s environment with the Linux Smart Enumeration script. 
-It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
-It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
+It allows to enumerate all containers from a given namespace, selected pods or selected containers of a given pod.
 It saves an enumeration report for each container separately in a file. The report can be saved in 
 a plain text, ansi or html output format.`,
 	SilenceErrors: true,
