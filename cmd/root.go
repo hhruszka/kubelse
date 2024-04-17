@@ -87,12 +87,12 @@ func init() {
 	}
 	cmd.Flags().StringVarP(&directory, "directory", "d", workingDirectory, "a directory where reports should be saved to")
 	cmd.Flags().StringVarP(&format, "output", "o", "ansi", "Output format: ansi, text, or html")
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "CNF namespace")
-	cmd.Flags().StringVarP(&podscli, "pods", "p", "", "a pod or pods, which containers are to be enumerated, if not provided then all containers in a namespace will be enumerated.")
-	cmd.Flags().StringVarP(&containerscli, "containers", "c", "", "a container or containers to be enumerated")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "a namespace")
+	cmd.Flags().StringVarP(&podscli, "pods", "p", "", "a pod or comma-separated pods, which containers are to be enumerated, if not provided then all containers in a namespace will be enumerated.")
+	cmd.Flags().StringVarP(&containerscli, "containers", "c", "", "a container or comma-separated containers to be enumerated")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "quiet execution - no status information")
 	cmd.Flags().BoolVarP(&version, "version", "v", false, "prints "+appName+" version")
-	cmd.Flags().BoolVarP(&list, "list", "l", false, "list containers")
+	cmd.Flags().BoolVarP(&list, "list", "l", false, "list containers, no enumeration executed")
 
 	// Disable automatic printing of usage when an error occurs
 	cmd.SilenceUsage = true
