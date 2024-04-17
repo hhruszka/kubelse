@@ -1,25 +1,23 @@
 
 This application enumerates containers in k8s environment with the [Linux Smart Enumeration script](https://github.com/diego-treitos/linux-smart-enumeration?tab=readme-ov-file).
-It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
-It allows to enumerate all containers from a given namespace, or a selected pod. It can also enumerate a specific container.
-It saves an enumeration report for each container separately in a file. The report can be saved in
-a plain text, ansi or html output format.
+It allows to enumerate all containers from a given namespace, selected pods or containers of a single pod. It saves an enumeration report for each container separately in a file. The report can be saved in a plain text, ansi or html output format.
 
 ### Usage
 ```
-bptcnflse [flags]
+kubelse [options]
 
 Options:
-  -c, --container string    a container name
-  -d, --directory string    a directory where reports should be saved to (default "/home/user" )
-  -h, --help                help for bptcnflse-windows-amd64.exe
-  -k, --kubeconfig string   (optional) absolute path to the kubeconfig file (default "~/.kube/config")
-  -l, --list                list containers
-  -n, --namespace string    CNF namespace (default "default")
+  -c, --containers string   a container or comma-separated containers to be enumerated
+  -d, --directory string    a directory where reports should be saved to (default "/Users/hhruszka/GolandProjects/kubelse")
+  -h, --help                help for kubelse-macos-arm64
+  -k, --kubeconfig string   (optional) absolute path to the kubeconfig file (default "/Users/hhruszka/.kube/config")
+  -l, --list                list containers, no enumeration
+  -n, --namespace string    a namespace (default "default")
   -o, --output string       Output format: ansi, text, or html (default "ansi")
-  -p, --pod string          a pod name, if not provided then all containers in a namespace will be enumerated.
+  -p, --pods string         a pod or comma-separated pods, which containers are to be enumerated, if not provided then all containers in a namespace will be enumerated.
   -q, --quiet               quiet execution - no status information
-  -v, --version             prints bptcnflse version
+  -v, --version             prints kubelse-macos-arm64 version
+
 ```
 
 ### Examples
